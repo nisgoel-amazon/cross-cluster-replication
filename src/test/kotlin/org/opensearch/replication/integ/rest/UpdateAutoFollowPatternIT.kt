@@ -184,7 +184,7 @@ class UpdateAutoFollowPatternIT: MultiClusterRestTestCase() {
             followerClient.deleteAutoFollowPattern(connectionAlias, indexPatternName)
         }
     }
-    
+
     fun `test auto follow stats`() {
         val indexPatternName2 = "test_pattern2"
         val indexPattern2 = "lead_index*"
@@ -309,6 +309,32 @@ class UpdateAutoFollowPatternIT: MultiClusterRestTestCase() {
         }.doesNotThrowAnyException()
 
     }
+    fun `test updation of auto follow pattern`() {
+        val followerClient = getClientForCluster(FOLLOWER)
+        createConnectionBetweenClusters(FOLLOWER, LEADER, connectionAlias)
+        followerClient.updateAutoFollowPattern(connectionAlias, indexPatternName, indexPattern)
+        val indexPattern1 = "log*"
+        //Re-create the same replication rule
+        Assertions.assertThatThrownBy {
+            followerClient.updateAutoFollowPattern(connectionAlias, indexPatternName, indexPattern)
+        }.isInstanceOf(ResponseException::class.java)
+                .hasMessageContaining("autofollow replication rule cannot be recreated/updated")
+
+        //Update the replication rule with different indexpattern
+        Assertions.assertThatThrownBy {
+            followerClient.updateAutoFollowPattern(connectionAlias, indexPatternName, indexPattern1)
+        }.isInstanceOf(ResponseException::class.java)
+                .hasMessageContaining("autofollow replication rule cannot be recreated/updated")
+
+        //Create a new replication rule with same indexpattern but unique rule name
+        Assertions.assertThatCode {
+            followerClient.updateAutoFollowPattern(connectionAlias, "unique-rule", indexPattern1)
+        }.doesNotThrowAnyException()
+
+        followerClient.deleteAutoFollowPattern(connectionAlias, indexPatternName)
+        followerClient.deleteAutoFollowPattern(connectionAlias, "unique-rule")
+
+    }
 
     fun `test removing autofollow pattern stop autofollow task`() {
         val followerClient = getClientForCluster(FOLLOWER)
@@ -344,12 +370,12 @@ class UpdateAutoFollowPatternIT: MultiClusterRestTestCase() {
         try {
             //modify retry duration to account for autofollow trigger in next retry
             followerClient.updateAutofollowRetrySetting("1m")
+            followerClient.updateAutoFollowPattern(connectionAlias, indexPatternName, indexPattern)
             for (repeat in 1..2) {
                 log.info("Current Iteration $repeat")
                 // Add replication start block
                 followerClient.updateReplicationStartBlockSetting(true)
                 createRandomIndex(leaderClient)
-                followerClient.updateAutoFollowPattern(connectionAlias, indexPatternName, indexPattern)
                 sleep(95000) // wait for auto follow trigger in the worst case
                 // verify both index replication tasks and autofollow tasks
                 // Replication shouldn't have been started - (repeat-1) tasks as for current loop index shouldn't be
@@ -455,6 +481,54 @@ class UpdateAutoFollowPatternIT: MultiClusterRestTestCase() {
 
     fun getIndexReplicationTasks(clusterName: String): List<TaskInfo> {
         return getReplicationTaskList(clusterName, IndexReplicationExecutor.TASK_NAME + "*")
+    }
+    fun `test auto follow should fail on indexPattern validation failure`() {
+        val followerClient = getClientForCluster(FOLLOWER)
+        createConnectionBetweenClusters(FOLLOWER, LEADER, connectionAlias)
+        assertPatternValidation(followerClient, "testPattern,",
+                "Autofollow pattern: testPattern, must not contain the following characters")
+        assertPatternValidation(followerClient, "testPat?",
+                "Autofollow pattern: testPat? must not contain the following characters")
+        assertPatternValidation(followerClient, "test#",
+                "Autofollow pattern: test# must not contain '#' or ':'")
+        assertPatternValidation(followerClient, "test:",
+                "Autofollow pattern: test: must not contain '#' or ':'")
+        assertPatternValidation(followerClient, "_test",
+                "Autofollow pattern: _test must not start with '_' or '-'")
+        assertPatternValidation(followerClient, "-leader",
+                "Autofollow pattern: -leader must not start with '_' or '-'")
+        assertPatternValidation(followerClient, "",
+                "Autofollow pattern:  must not be empty")
+
+    }
+    private fun assertPatternValidation(followerClient: RestHighLevelClient, pattern: String,
+                                        errorMsg: String) {
+        Assertions.assertThatThrownBy {
+            followerClient.updateAutoFollowPattern(connectionAlias, indexPatternName, pattern)
+        }.isInstanceOf(ResponseException::class.java)
+                .hasMessageContaining(errorMsg)
+    }
+
+    fun `test auto follow should succeed on valid indexPatterns`() {
+        val followerClient = getClientForCluster(FOLLOWER)
+        createConnectionBetweenClusters(FOLLOWER, LEADER, connectionAlias)
+        assertValidPatternValidation(followerClient, "test-leader")
+        assertValidPatternValidation(followerClient, "test*")
+        assertValidPatternValidation(followerClient, "leader-*")
+        assertValidPatternValidation(followerClient, "leader_test")
+        assertValidPatternValidation(followerClient, "Leader_Test-*")
+        assertValidPatternValidation(followerClient, "Leader_*")
+
+    }
+
+    private fun assertValidPatternValidation(followerClient: RestHighLevelClient, pattern: String) {
+        Assertions.assertThatCode {
+            try {
+                followerClient.updateAutoFollowPattern(connectionAlias, indexPatternName, pattern)
+            } finally {
+                followerClient.deleteAutoFollowPattern(connectionAlias, indexPatternName)
+            }
+        }.doesNotThrowAnyException()
     }
 
     fun createDummyConnection(fromClusterName: String, connectionName: String="source") {
